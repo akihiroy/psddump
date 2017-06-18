@@ -51,6 +51,24 @@ void DumpEnum(const char *name, int val, const std::array<const char *, Size>& t
 	printf("%*s%s: %d (%s)\n", g_Indent * 2, "", name, val, (0 <= val && val < Size) ? table[val] : "Unknown");
 }
 
+template<size_t Size>
+void DumpFlags(const char *name, uint32_t flags, const std::array<const char *, Size>& table)
+{
+	std::string flags_comment;
+	for (size_t i = 0; i < Size; ++i) {
+		if (flags & (1 << i)) {
+			if (!flags_comment.empty()) flags_comment += ", ";
+			flags_comment += table[i];
+		}
+	}
+
+	if (flags_comment.empty()) {
+		printf("%*s%s: 0x%x\n", g_Indent * 2, "", name, flags);
+	} else {
+		printf("%*s%s: 0x%x\t# %s\n", g_Indent * 2, "", name, flags, flags_comment.c_str());
+	}
+}
+
 void DumpBin(const char *name, const uint8_t *data, size_t len, size_t max_len = -1)
 {
 	printf("%*s%s (%llubytes):\n", g_Indent * 2, "", name, (uint64_t)len);
@@ -968,17 +986,14 @@ void PSDParser::ReadLayers()
 			DumpInt("opacity", read_integer<uint8_t>());
 			DumpInt("clipping", read_integer<uint8_t>());
 
-			uint8_t flags = read_integer<uint8_t>();
-			std::string flags_comment;
-			if (flags & 1) flags_comment += "transparency protected, ";
-			if (flags & 2) flags_comment += "visible, ";
-			if (flags & 4) flags_comment += "obsolete, ";
-			if (flags & 8) {
-				flags_comment += "Photoshop 5.0 and later, ";
-				if (flags & 16) flags_comment += "pixel data irrelevant to appearance of document, ";
-			}
-			if (!flags_comment.empty()) flags_comment.erase(flags_comment.size() - 2, 2);	// remove last comma
-			DumpInt("flags", flags, flags_comment.c_str());
+			const static std::array<const char *, 5> flag_desc = {
+				"transparency protected",
+				"visible",
+				"obsolete",
+				"Photoshop 5.0 and later",
+				"pixel data irrelevant to appearance of document"
+			};
+			DumpFlags("flags", read_integer<uint8_t>(), flag_desc);
 
 			m_Stream->seekg(1, std::ios::cur);	// Filler
 
@@ -988,6 +1003,35 @@ void PSDParser::ReadLayers()
 			DumpInt("extra_data_len", extra_data_len);
 
 			// Layer mask data
+			{
+				uint32_t mask_data_len = read_integer<uint32_t>();
+				ScopedDumpSection channel_info_section("layer_mask_data", m_Stream->tellg(), mask_data_len);
+				if (mask_data_len > 0) {
+					DumpInt("top", read_integer<int32_t>());
+					DumpInt("left", read_integer<int32_t>());
+					DumpInt("bottom", read_integer<int32_t>());
+					DumpInt("right", read_integer<int32_t>());
+					DumpInt("default_color", read_integer<uint8_t>());
+
+					const static std::array<const char *, 5> flag_desc = {
+						"position relative to layer",
+						"layer mask disabled",
+						"invert layer mask when blending",
+						"the user mask actually came from rendering other data",
+						"the user and/or vector masks have parameters applied to them"
+					};
+					uint8_t flags = read_integer<uint8_t>();
+					DumpFlags("flags", flags, flag_desc);
+
+					if (flags & (1 << 4)) {
+						DumpInt("mask_parameters", read_integer<uint8_t>());
+
+					}
+				}
+
+			}
+			uint8_t mask_default_color = read_integer<uint8_t>();
+
 
 			// Layer blending ranges
 
