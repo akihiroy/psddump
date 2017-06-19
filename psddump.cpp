@@ -35,6 +35,15 @@ void DumpInt(const char *name, int val, const char *comment = nullptr)
 	}
 }
 
+void DumpDouble(const char *name, double val, const char *comment = nullptr)
+{
+	if (comment) {
+		printf("%*s%s: %f\t# %s\n", g_Indent * 2, "", name, val, comment);
+	} else {
+		printf("%*s%s: %f\n", g_Indent * 2, "", name, val);
+	}
+}
+
 void DumpStr(const char *name, const char *val, int len = -1)
 {
 	std::string buf;
@@ -67,6 +76,17 @@ void DumpFlags(const char *name, uint32_t flags, const std::array<const char *, 
 	} else {
 		printf("%*s%s: 0x%x\t# %s\n", g_Indent * 2, "", name, flags, flags_comment.c_str());
 	}
+}
+
+template<class T>
+void DumpArray(const char *name, const T* data, size_t count)
+{
+	printf("%*s%s: [", g_Indent * 2, "", name);
+	for (size_t i = 0; i < count; ++i) {
+		if (i >= 1) std::cout << ", ";
+		std::cout << data[i];
+	}
+	printf("]\n");
 }
 
 void DumpBin(const char *name, const uint8_t *data, size_t len, size_t max_len = -1)
@@ -120,6 +140,7 @@ private:
 
 	struct Layer {
 		int32_t top, left, bottom, right;
+		int32_t mask_top, mask_left, mask_bottom, mask_right;
 
 		struct ChannelInfo {
 			int16_t channel_id;
@@ -134,6 +155,8 @@ private:
 		};
 
 		std::vector<ChannelInfo> channel_infos;
+
+		std::string name;
 	};
 
 	int16_t m_LayerCount;
@@ -253,6 +276,8 @@ private:
 	void ReadImageResources();
 	void ReadLayerAndMaskInfo();
 	void ReadLayers();
+	void ReadGlobalLayerMaskInfo();
+	void ReadAdditionalLayerInfo(std::streampos end);
 	void ReadImageData();
 
 public:
@@ -925,6 +950,10 @@ void PSDParser::ReadLayerAndMaskInfo()
 
 	if (length > 0) {
 		ReadLayers();
+
+		ReadGlobalLayerMaskInfo();
+
+		ReadAdditionalLayerInfo(end);
 	}
 
 	m_Stream->seekg(end);
@@ -1005,12 +1034,18 @@ void PSDParser::ReadLayers()
 			// Layer mask data
 			{
 				uint32_t mask_data_len = read_integer<uint32_t>();
-				ScopedDumpSection channel_info_section("layer_mask_data", m_Stream->tellg(), mask_data_len);
+				auto mask_data_begin = m_Stream->tellg();
+				auto mask_data_end = mask_data_begin + (std::streamoff)mask_data_len;
+				ScopedDumpSection layer_mask_data_section("layer_mask_data", mask_data_begin, mask_data_len);
 				if (mask_data_len > 0) {
-					DumpInt("top", read_integer<int32_t>());
-					DumpInt("left", read_integer<int32_t>());
-					DumpInt("bottom", read_integer<int32_t>());
-					DumpInt("right", read_integer<int32_t>());
+					layer.mask_top = read_integer<int32_t>();
+					layer.mask_left = read_integer<int32_t>();
+					layer.mask_bottom = read_integer<int32_t>();
+					layer.mask_right = read_integer<int32_t>();
+					DumpInt("top", layer.mask_top);
+					DumpInt("left", layer.mask_left);
+					DumpInt("bottom", layer.mask_bottom);
+					DumpInt("right", layer.mask_right);
 					DumpInt("default_color", read_integer<uint8_t>());
 
 					const static std::array<const char *, 5> flag_desc = {
@@ -1024,18 +1059,51 @@ void PSDParser::ReadLayers()
 					DumpFlags("flags", flags, flag_desc);
 
 					if (flags & (1 << 4)) {
-						DumpInt("mask_parameters", read_integer<uint8_t>());
-
+						const static std::array<const char *, 4> mask_parameters_desc = {
+							"user mask density",
+							"user mask feather",
+							"vector mask density",
+							"vector mask feather"
+						};
+						uint8_t mask_parameters = read_integer<uint8_t>();
+						DumpFlags("mask_parameters", mask_parameters, mask_parameters_desc);
+						if (mask_parameters & (1 << 0)) DumpInt("user_mask_density", read_integer<uint8_t>());
+						if (mask_parameters & (1 << 1)) DumpDouble("user_mask_feather", read_integer<double>());
+						if (mask_parameters & (1 << 2)) DumpInt("vector_mask_density", read_integer<uint8_t>());
+						if (mask_parameters & (1 << 3)) DumpDouble("vector_mask_feather", read_integer<double>());
 					}
+
+					if (mask_data_len == 20) {
+						m_Stream->seekg(2, std::ios::cur);	// skip padding
+					} else {
+						uint8_t real_flags = read_integer<uint8_t>();
+						DumpFlags("real_flags", real_flags, flag_desc);
+						DumpInt("real_user_mask_background", read_integer<uint8_t>());
+						DumpInt("real_top", read_integer<int32_t>());
+						DumpInt("real_left", read_integer<int32_t>());
+						DumpInt("real_bottom", read_integer<int32_t>());
+						DumpInt("real_right", read_integer<int32_t>());
+					}
+					m_Stream->seekg(mask_data_end);
 				}
-
 			}
-			uint8_t mask_default_color = read_integer<uint8_t>();
-
 
 			// Layer blending ranges
+			{
+				uint32_t blending_ranges_len = read_integer<uint32_t>();
+				auto blending_ranges_begin = m_Stream->tellg();
+				auto blending_ranges_end = blending_ranges_begin + (std::streamoff)blending_ranges_len;
+				ScopedDumpSection layer_mask_data_section("layer_blending_ranges_data", blending_ranges_begin, blending_ranges_len);
+
+				for (size_t ch = 0; ch < layer.channel_infos.size(); ++ch) {
+					// TODO Dump channel ranges
+				}
+
+				m_Stream->seekg(blending_ranges_end);
+			}
 
 			// Layer name
+			layer.name = read_pascal_string(4);
 
 			m_Stream->seekg(extra_data_end);
 
@@ -1043,14 +1111,148 @@ void PSDParser::ReadLayers()
 		}
 
 		// Channel image data
+		auto channel_image_data_begin = m_Stream->tellg();
+		ScopedDumpSection layer_mask_data_section("channel_image_data", channel_image_data_begin, end - channel_image_data_begin);
+		for (auto& layer : m_Layers) {
+			for (size_t ch = 0; ch < layer.channel_infos.size(); ++ch) {
+				auto data_end = m_Stream->tellg() + (std::streamoff)layer.channel_infos[ch].channel_data_len;
 
+				const static std::array<const char *, 4> compression_desc = {
+					"Raw",
+					"RLE",
+					"ZIP without prediction",
+					"ZIP with prediction"
+				};
+				uint16_t compression = read_integer<uint16_t>();
+				DumpEnum("compression", compression, compression_desc);
+
+
+				int width, height;
+				if (layer.channel_infos[ch].channel_id == -2) {
+					// User Supplied Layer Mask
+					width = std::abs(layer.mask_right - layer.mask_left);
+					height = std::abs(layer.mask_bottom - layer.mask_top);
+				} else {
+					width = std::abs(layer.right - layer.left);
+					height = std::abs(layer.bottom - layer.top);
+				}
+
+				uint64_t data_len = 0;
+				if (compression == 1) {
+					for (int row = 0; row < height; ++row) {
+						uint32_t rle_length = m_Header.version == 1 ? read_integer<uint16_t>() : read_integer<uint32_t>();
+						data_len += rle_length;
+					}
+				} else {
+					data_len = height * ((width * m_Header.depth + 7) / 8);
+				}
+
+				std::vector<uint8_t> channel_data((size_t)data_len);
+				m_Stream->read((char *)channel_data.data(), channel_data.size());
+
+				DumpBin((std::string("channel") + std::to_string(ch)).c_str(), channel_data.data(), (size_t)data_len, 16 * 4);
+
+				m_Stream->seekg(data_end);
+			}
+		}
 	}
 
 	m_Stream->seekg(end);
 }
 
+void PSDParser::ReadGlobalLayerMaskInfo()
+{
+	uint32_t length = read_integer<uint32_t>();
+	auto begin = m_Stream->tellg();
+	auto end = begin + (std::streamoff)length;
+
+	ScopedDumpSection section("GlobalLayerMaskInfo", begin, length);
+
+	DumpInt("overlay_color_space", read_integer<uint16_t>());
+
+	uint16_t color_comps[4];
+	for (size_t i = 0; i < 4; ++i) {
+		color_comps[i] = read_integer<uint16_t>();
+	}
+	DumpArray("color_components", color_comps, 4);
+
+	DumpInt("opacity", read_integer<uint16_t>());
+	DumpInt("kind", read_integer<uint8_t>());
+
+	m_Stream->seekg(end);
+}
+
+void PSDParser::ReadAdditionalLayerInfo(std::streampos end)
+{
+	auto begin = m_Stream->tellg();
+	ScopedDumpSection section("AdditionalLayerInformation", begin, end - begin);
+
+	while (end - m_Stream->tellg() >= 12) {
+		auto info_begin = m_Stream->tellg();
+
+		char signature[4];
+		m_Stream->read(signature, 4);
+		if (std::memcmp(signature, "8BIM", 4) != 0 && std::memcmp(signature, "8B64", 4) != 0) {
+			return;
+		}
+
+		char key[4];
+		m_Stream->read(key, 4);
+		uint32_t fcc = *(uint32_t *)key;
+		
+		uint64_t length;
+		if (m_Header.version == 2 && (fcc == 'LMsk' || fcc == 'Lr16' || fcc == 'Lr32' || fcc == 'Layr' || fcc == 'Mt16' || fcc == 'Mt32' || fcc == 'Mtrn' || fcc == 'Alph' || fcc == 'FMsk' || fcc == 'lnk2' || fcc == 'FEid' || fcc == 'FXid' || fcc == 'PxSD')) {
+			// LMsk, Lr16, Lr32, Layr, Mt16, Mt32, Mtrn, Alph, FMsk, lnk2, FEid, FXid, PxSD
+			length = read_integer<uint64_t>();
+		} else {
+			length = read_integer<uint32_t>();
+		}
+
+		ScopedDumpSection info_section(std::string(key, 4), info_begin, length + (m_Stream->tellg() - info_begin));
+
+	}
+}
+
 void PSDParser::ReadImageData()
 {
+	auto begin = m_Stream->tellg();
+	m_Stream->seekg(0, std::ios::end);
+	auto end = m_Stream->tellg();
+	m_Stream->seekg(begin);
+	ScopedDumpSection section("ImageData", begin, end - begin);
+
+	const static std::array<const char *, 4> compression_desc = {
+		"Raw",
+		"RLE",
+		"ZIP without prediction",
+		"ZIP with prediction"
+	};
+	uint16_t compression = read_integer<uint16_t>();
+	DumpEnum("compression", compression, compression_desc);
+
+	struct ChannelInfo {
+		uint64_t length = 0;
+	};
+
+	std::vector<ChannelInfo> channels(m_Header.num_of_channels);
+
+	for (uint16_t ch = 0; ch < m_Header.num_of_channels; ++ch) {
+		if (compression == 1) {
+			for (uint32_t row = 0; row < m_Header.height; ++row) {
+				uint32_t rle_length = m_Header.version == 1 ? read_integer<uint16_t>() : read_integer<uint32_t>();
+				channels[ch].length += rle_length;
+			}
+		} else {
+			channels[ch].length = m_Header.height * (m_Header.width * m_Header.depth + 7) / 8;
+		}
+	}
+
+	for (uint16_t ch = 0; ch < m_Header.num_of_channels; ++ch) {
+		std::vector<uint8_t> channel_data((size_t)channels[ch].length);
+		m_Stream->read((char *)channel_data.data(), channel_data.size());
+
+		DumpBin((std::string("channel") + std::to_string(ch)).c_str(), channel_data.data(), (size_t)channels[ch].length, 16 * 4);
+	}
 }
 
 bool PSDParser::Dump()
