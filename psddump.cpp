@@ -1168,18 +1168,20 @@ void PSDParser::ReadGlobalLayerMaskInfo()
 
 	ScopedDumpSection section("GlobalLayerMaskInfo", begin, length);
 
-	DumpInt("overlay_color_space", read_integer<uint16_t>());
+	if (length > 0) {
+		DumpInt("overlay_color_space", read_integer<uint16_t>());
 
-	uint16_t color_comps[4];
-	for (size_t i = 0; i < 4; ++i) {
-		color_comps[i] = read_integer<uint16_t>();
+		uint16_t color_comps[4];
+		for (size_t i = 0; i < 4; ++i) {
+			color_comps[i] = read_integer<uint16_t>();
+		}
+		DumpArray("color_components", color_comps, 4);
+
+		DumpInt("opacity", read_integer<uint16_t>());
+		DumpInt("kind", read_integer<uint8_t>());
+
+		m_Stream->seekg(end);
 	}
-	DumpArray("color_components", color_comps, 4);
-
-	DumpInt("opacity", read_integer<uint16_t>());
-	DumpInt("kind", read_integer<uint8_t>());
-
-	m_Stream->seekg(end);
 }
 
 void PSDParser::ReadAdditionalLayerInfo(std::streampos end)
@@ -1210,6 +1212,9 @@ void PSDParser::ReadAdditionalLayerInfo(std::streampos end)
 
 		ScopedDumpSection info_section(std::string(key, 4), info_begin, length + (m_Stream->tellg() - info_begin));
 
+		length = (length + 3) & ~3;	// Round up
+
+		m_Stream->seekg(length, std::ios::cur);
 	}
 }
 
@@ -1243,7 +1248,7 @@ void PSDParser::ReadImageData()
 				channels[ch].length += rle_length;
 			}
 		} else {
-			channels[ch].length = m_Header.height * (m_Header.width * m_Header.depth + 7) / 8;
+			channels[ch].length = m_Header.height * ((m_Header.width * m_Header.depth + 7) / 8);
 		}
 	}
 
